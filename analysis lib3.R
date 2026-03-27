@@ -10,7 +10,7 @@ figuresDir <- file.path("outputFigures", lib3)
 dir.create(objectsDir, recursive = TRUE, showWarnings = FALSE)
 dir.create(figuresDir, recursive = TRUE, showWarnings = FALSE)
 getwd()
-
+library(Seurat)
 ##  Importing 10x data      --------------------------------------
 rawData <- Read10X("C:/Users/ktari/Desktop/Analysis scRNAseq/Lib3/filtered_feature_bc_matrix/")
 library(dplyr)
@@ -42,18 +42,17 @@ seuratObj <- ScaleData(seuratObj, features = VariableFeatures(seuratObj))
 seuratObj[["HTO"]] <- CreateAssayObject(counts = hto)
 seuratObj <- NormalizeData(seuratObj, assay = "HTO", normalization.method = "CLR")
 
-
-## QC for HTODemux ----------------------
+## QC for HTODemux ---------------------- 
 library(ggplot2)
 library(dplyr)
-
-# créer fontion colpalettegenerator
-colPaletteGenerator <- function(n) {
+# créer fontion colpalettegenerator 
+colPaletteGenerator <- function(n) { 
   grDevices::colorRampPalette(c(
-    "#1b9e77", "#d95f02", "#7570b3", "#e7298a",
-    "#66a61e", "#e6ab02", "#a6761d", "#666666"
-  ))(n)
-}
+    "#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02", "#a6761d", "#666666" ))(n) }
+
+
+
+
 # Créer le sous-dossier QC
 qcDir <- file.path(figuresDir, "QC")
 dir.create(qcDir, recursive = TRUE, showWarnings = FALSE)
@@ -122,6 +121,17 @@ dev.off()
 seuratObj <- HTODemux(seuratObj, assay = "HTO", positive.quantile = 0.99)
 table(seuratObj$HTO_classification.global)
 table(seuratObj$hash.ID)  
+colnames(seuratObj@meta.data)
+Assays(seuratObj)
+seuratObj[["HTO"]]
+seuratObj <- HTODemux(
+  object = seuratObj,
+  assay = "HTO",
+  positive.quantile = 0.99
+)
+colnames(seuratObj@meta.data)
+
+
 
 ##  Filtering : keep singlet   ------------------------
 Idents(seuratObj) <- seuratObj$HTO_classification.global
@@ -333,23 +343,49 @@ seuratObj <- FindClusters(
   resolution = c(seq(0.1, 0.6, by = 0.1), seq(0.7, 1.5, by = 0.2))
 )
 
-##  Add umap coordinates to metadata      --------------------------------------
-# Vérifier que UMAP existe
-if (!"umap" %in% names(seuratObj@reductions)) {
-  stop("UMAP not found in seuratObj@reductions. Run RunUMAP() before this step.")
-}
-library(tibble)
-seuratObj@meta.data <- merge(
-  seuratObj@meta.data,
-  as.data.frame(seuratObj@reductions$umap@cell.embeddings),
-  by = 0
+## ================== CLEAN OBJECT REBUILD ==================
+
+# Extraire les counts RNA
+counts <- GetAssayData(seuratObj, assay = "RNA", layer = "counts")
+# Recréer un objet propre
+seuratObj_clean <- CreateSeuratObject(counts = counts)
+
+# Ajouter metadata (IMPORTANT : aligné automatiquement par noms)
+seuratObj_clean <- AddMetaData(seuratObj_clean, metadata = seuratObj@meta.data)
+
+## ================== REFAIRE PIPELINE ==================
+
+# SCTransform
+seuratObj_clean <- SCTransform(
+  seuratObj_clean,
+  vars.to.regress = "percent.mt",
+  verbose = FALSE
 )
-identical(rownames(seuratObj@meta.data), colnames(seuratObj))
-head(rownames(seuratObj@meta.data))
-head(colnames(seuratObj))
 
-file.exists(file.path(objectsDir, "Lib3_checkpoint_afterHTO_Singlet.rds"))
+# PCA
+seuratObj_clean <- RunPCA(seuratObj_clean, npcs = 50, verbose = FALSE)
 
+# Choisir dimensions raisonnables
+ndims <- 30
+
+# Neighbors + clustering
+seuratObj_clean <- FindNeighbors(seuratObj_clean, dims = 1:ndims)
+seuratObj_clean <- FindClusters(seuratObj_clean, resolution = 0.5)
+
+# UMAP
+seuratObj_clean <- RunUMAP(seuratObj_clean, dims = 1:ndims, verbose = FALSE)
+
+## ================== CHECK ==================
+
+cat("Nombre de cellules :", ncol(seuratObj_clean), "\n")
+cat("PCA cellules :", ncol(seuratObj_clean[["pca"]]), "\n")
+cat("UMAP cellules :", ncol(seuratObj_clean[["umap"]]), "\n")
+
+## ================== PLOTS ==================
+
+DimPlot(seuratObj_clean, reduction = "umap", group.by = "seurat_clusters")
+DimPlot(seuratObj_clean, reduction = "umap", group.by = "hash.ID")
+DimPlot(seuratObj_clean, reduction = "umap", group.by = "VDJ_present")
 ##  Cell Cycle      -------------------------------------------------------
 # Faire le scoring sur RNA (plus stable pour les signatures de cycle cellulaire)
 DefaultAssay(seuratObj) <- "RNA"
@@ -429,26 +465,27 @@ seuratObj <- RunUMAP(
 print(Assays(seuratObj))
 print(colnames(seuratObj@meta.data)[grep("snn_res|seurat_clusters", colnames(seuratObj@meta.data))])
 print(table(Idents(seuratObj)))
-
+colnames(seuratObj@meta.data)
+table(seuratObj$hash.ID)
 ##  Enrich metadata : Condition + Clonotype   -------------------------------------------
 
 
 # 5) Ton label clustering personnalisé 
-seuratObj@meta.data <- seuratObj@meta.data %>% 
+seuratObj$Condition <- seuratObj$hash.ID
+seuratObj@meta.data <- seuratObj@meta.data %>%
   mutate(
-    Clust_res0.1 = as.factor(paste0(SCT_snn_res.0.1, substr(Condition,1,1))),
-    Clust_res0.2 = as.factor(paste0(SCT_snn_res.0.2, substr(Condition,1,1))),
-    Clust_res0.3 = as.factor(paste0(SCT_snn_res.0.3, substr(Condition,1,1))),
-    Clust_res0.4 = as.factor(paste0(SCT_snn_res.0.4, substr(Condition,1,1))),
-    Clust_res0.5 = as.factor(paste0(SCT_snn_res.0.5, substr(Condition,1,1))),
-    Clust_res0.6 = as.factor(paste0(SCT_snn_res.0.6, substr(Condition,1,1))),
-    Clust_res0.7 = as.factor(paste0(SCT_snn_res.0.7, substr(Condition,1,1))),
-    Clust_res0.9 = as.factor(paste0(SCT_snn_res.0.9, substr(Condition,1,1))),
-    Clust_res1.1 = as.factor(paste0(SCT_snn_res.1.1, substr(Condition,1,1))),
-    Clust_res1.3 = as.factor(paste0(SCT_snn_res.1.3, substr(Condition,1,1))),
-    Clust_res1.5 = as.factor(paste0(SCT_snn_res.1.5, substr(Condition,1,1)))
+    Clust_res0.1 = as.factor(paste0(SCT_snn_res.0.1, "_", Condition)),
+    Clust_res0.2 = as.factor(paste0(SCT_snn_res.0.2, "_", Condition)),
+    Clust_res0.3 = as.factor(paste0(SCT_snn_res.0.3, "_", Condition)),
+    Clust_res0.4 = as.factor(paste0(SCT_snn_res.0.4, "_", Condition)),
+    Clust_res0.5 = as.factor(paste0(SCT_snn_res.0.5, "_", Condition)),
+    Clust_res0.6 = as.factor(paste0(SCT_snn_res.0.6, "_", Condition)),
+    Clust_res0.7 = as.factor(paste0(SCT_snn_res.0.7, "_", Condition)),
+    Clust_res0.9 = as.factor(paste0(SCT_snn_res.0.9, "_", Condition)),
+    Clust_res1.1 = as.factor(paste0(SCT_snn_res.1.1, "_", Condition)),
+    Clust_res1.3 = as.factor(paste0(SCT_snn_res.1.3, "_", Condition)),
+    Clust_res1.5 = as.factor(paste0(SCT_snn_res.1.5, "_", Condition))
   )
-
 #  label à partir du clustering actif
 seuratObj@meta.data <- seuratObj@meta.data %>%
   mutate(
@@ -457,8 +494,6 @@ seuratObj@meta.data <- seuratObj@meta.data %>%
 
 # Vérifs
 table(seuratObj$Condition, useNA = "ifany")
-head(seuratObj@meta.data[, c("hash.ID","Condition","clone_id","Clonotype","seurat_clusters","Clust_current")])
-
 
 # Repartir de vdj_use ----------------
 
@@ -485,7 +520,7 @@ seuratObj <- AddMetaData(seuratObj, metadata = vdj_meta2_aligned)
 seuratObj$TCR <- seuratObj$v_call_productive
 
 # Garder les versions originales
-seuratObj$Clonotype_raw <- seuratObj$Clonotype
+seuratObj$Clonotype_raw <- seuratObj$clone_id_productive
 seuratObj$TCR_raw <- seuratObj$TCR
 
 # Fonction de recodage
@@ -519,10 +554,34 @@ table(seuratObj$TCR_grouped, useNA = "ifany")
 ## Adjusting clonotypes and TCR annotations
 seuratObj@meta.data$TCR <- seuratObj@meta.data$v_call_productive
 
-# garder les versions originales
-seuratObj@meta.data$Clonotype_raw <- seuratObj@meta.data$Clonotype
-seuratObj@meta.data$TCR_raw <- seuratObj@meta.data$TCR
+# ── ÉTAPE 1 : Extraire V-J depuis vdjData ──────────────────────
+vdj_tcr <- vdjData %>%
+  filter(trimws(tolower(as.character(productive))) %in% c("true", "t", "1", "yes")) %>%
+  group_by(cell_id) %>%
+  reframe(
+    TCR = paste(
+      paste(unique(na.omit(v_call)), unique(na.omit(j_call)), sep = "_"),
+      collapse = ";"
+    )
+  ) %>%
+  distinct(cell_id, .keep_all = TRUE) %>%  # garder 1 ligne par cellule
+  as.data.frame()
 
+rownames(vdj_tcr) <- vdj_tcr$cell_id
+vdj_tcr$cell_id <- NULL
+# ── ÉTAPE 2 : Ajouter TCR au Seurat object ─────────────────────
+seuratObj <- AddMetaData(seuratObj, metadata = vdj_tcr)
+
+# ── ÉTAPE 3 : Créer Clonotype ──────────────────────────────────
+seuratObj$Clonotype <- seuratObj$clone_id_productive
+
+# ── ÉTAPE 4 : Vérifier avant la boucle ────────────────────────
+head(seuratObj@meta.data[, c("Clonotype", "TCR")])
+table(is.na(seuratObj$TCR))
+
+# ── BOUCLE FOR (ton code existant) ────────────────────────────
+seuratObj$Clonotype_raw <- seuratObj$Clonotype
+seuratObj$TCR_raw       <- seuratObj$TCR
 
 for (c in c("Clonotype", "TCR")) {
   
@@ -582,10 +641,6 @@ dev.off()
 
 checkMissingClonoCells_simple <- function(seuratObj, vdjDataSupp) {
   
-  # Vérifs minimales
-  if (!"cell_id" %in% colnames(seuratObj@meta.data)) {
-    stop("cell_id absent de seuratObj@meta.data")
-  }
   if (!"Clonotype" %in% colnames(seuratObj@meta.data)) {
     stop("Clonotype absent de seuratObj@meta.data")
   }
@@ -593,19 +648,16 @@ checkMissingClonoCells_simple <- function(seuratObj, vdjDataSupp) {
     stop("barcode absent de vdjDataSupp (all_contig_annotations.csv)")
   }
   
-  # Cellules Seurat avec clonotype missing
   missing_cells <- seuratObj@meta.data %>%
     tibble::rownames_to_column("seurat_barcode") %>%
-    mutate(cell_id_use = dplyr::coalesce(cell_id, seurat_barcode)) %>%
+    mutate(cell_id_use = seurat_barcode) %>%
     filter(Clonotype == "missing") %>%
     pull(cell_id_use) %>%
     unique()
   
-  # Sous-ensemble VDJ pour ces cellules
   vdj_sub <- vdjDataSupp %>%
     filter(barcode %in% missing_cells)
   
-  # Si colonnes présentes, on utilise une logique un peu plus informative
   has_chain <- "chain" %in% colnames(vdj_sub)
   has_prod  <- "productive" %in% colnames(vdj_sub)
   
@@ -613,8 +665,6 @@ checkMissingClonoCells_simple <- function(seuratObj, vdjDataSupp) {
     return(data.frame(cell_id = character(0), reason = character(0)))
   }
   
-  # Candidate = cellule présente dans all_contig_annotations malgré clonotype "missing"
-  # (ça veut dire qu'il existe au moins un contig détecté)
   out <- vdj_sub %>%
     group_by(barcode) %>%
     summarise(
@@ -648,32 +698,40 @@ nrow(missingClonotypesInfo)
 
 
 ## annotation  ----------
-seuratObj@meta.data <- seuratObj@meta.data %>% 
+# Créer TCR_chain avant le mutate
+seuratObj$TCR_chain <- case_when(
+  grepl("TRAV", seuratObj$TCR) & grepl("TRBV", seuratObj$TCR) ~ "AB",
+  grepl("TRBV", seuratObj$TCR) ~ "B",
+  grepl("TRAV", seuratObj$TCR) ~ "A",
+  TRUE ~ "unknown"
+)
+
+# Mutate corrigé
+seuratObj@meta.data <- seuratObj@meta.data %>%
   mutate(
     Clonotype = case_when(
-      cell_id %in% missingClonotypesInfo$cell_id ~ "immature_TCR",
+      rownames(seuratObj@meta.data) %in% missingClonotypesInfo$cell_id ~ "immature_TCR",
       TRUE ~ Clonotype
     ),
     Clonal_status = case_when(
-      Clonotype == "unique" ~ "no_blast",
-      Clonotype %in% c("missing","immature_TCR") ~ "missing_clonotype",
-      Clonotype == "low_count" ~ "tiny_blast",
-      TRUE ~ "blast"
+      Clonotype == "unique"                          ~ "no_blast",
+      Clonotype %in% c("missing", "immature_TCR")   ~ "missing_clonotype",
+      Clonotype == "low_count"                       ~ "tiny_blast",
+      TRUE                                           ~ "blast"
     ),
     VDJ_like_class1 = case_when(
-      TCR_chain == "AB" & productive == "TRUE" ~ "late_post_B_checkpoint",
-      TCR_chain == "B"  & productive == "TRUE" ~ "early_post_B_checkpoint",
-      TCR_chain == "A"  & productive == "TRUE" ~ "only_A_chain",
-      TRUE ~ "uncertain"
+      TCR_chain == "AB" & n_productive_contigs > 0  ~ "late_post_B_checkpoint",
+      TCR_chain == "B"  & n_productive_contigs > 0  ~ "early_post_B_checkpoint",
+      TCR_chain == "A"  & n_productive_contigs > 0  ~ "only_A_chain",
+      TRUE                                           ~ "uncertain"
     ),
     VDJ_like_class2 = case_when(
-      Clonal_status == "tiny_blast" ~ "tiny_blast",
-      Clonal_status == "no_blast" ~ "no_blast",
-      Clonal_status == "missing_clonotype" & cell_id %in% missingClonotypesInfo$cell_id ~ "pre_B_checkpoint_candidate",
-      TRUE ~ VDJ_like_class1
+      Clonal_status == "tiny_blast"                                                         ~ "tiny_blast",
+      Clonal_status == "no_blast"                                                           ~ "no_blast",
+      Clonal_status == "missing_clonotype" & rownames(seuratObj@meta.data) %in% missingClonotypesInfo$cell_id ~ "pre_B_checkpoint_candidate",
+      TRUE                                                                                  ~ VDJ_like_class1
     )
   )
-
 
 #plots metadata ---------------------
 
@@ -900,12 +958,12 @@ if (!all(c("UMAP_1_plot", "UMAP_2_plot") %in% colnames(seuratObj@meta.data))) {
   colnames(umap_df) <- c("UMAP_1_plot", "UMAP_2_plot")
   
   seuratObj@meta.data <- seuratObj@meta.data %>%
-    rownames_to_column("cell_barcode_tmp") %>%
+    tibble::rownames_to_column("cell_barcode_tmp") %>%
     left_join(
-      umap_df %>% rownames_to_column("cell_barcode_tmp"),
+      umap_df %>% tibble::rownames_to_column("cell_barcode_tmp"),
       by = "cell_barcode_tmp"
     ) %>%
-    column_to_rownames("cell_barcode_tmp")
+    tibble::column_to_rownames("cell_barcode_tmp")
 }
 
 ##Export PDF Cell Cycle
@@ -2076,7 +2134,7 @@ if (length(markersBy) == 0) stop("Aucun groupBy trouvé dans meta.data.")
 # 5) A) Enregistrer 1 PDF multi-pages
 pdf_all <- file.path(outDir, paste0(lib3, "_Markers_UMAP_DotPlot_pretty_ALL.pdf"))
 pdf(pdf_all, width = 11, height = 13)
-
+library(patchwork)
 for (gb in markersBy) {
   p <- plot_umap_dot(seuratObj, gb, markers_panel)
   print(p)
@@ -2175,12 +2233,12 @@ umap_df <- as.data.frame(Embeddings(seuratObj_ccreg, "umap"))
 colnames(umap_df) <- c("umap_1", "umap_2")
 
 seuratObj_ccreg@meta.data <- seuratObj_ccreg@meta.data %>%
-  rownames_to_column("cell_barcode_tmp") %>%
+  tibble::rownames_to_column("cell_barcode_tmp") %>%
   left_join(
-    umap_df %>% rownames_to_column("cell_barcode_tmp"),
+    umap_df %>% tibble::rownames_to_column("cell_barcode_tmp"),
     by = "cell_barcode_tmp"
   ) %>%
-  column_to_rownames("cell_barcode_tmp")
+  tibble::column_to_rownames("cell_barcode_tmp")
 
 
 # 6) Vérifs
@@ -2281,10 +2339,12 @@ if ("Phase" %in% colnames(seuratObj_ccreg@meta.data)) {
 
 dev.off()
 
-
-# DEG global ------------------------
+#DEG global ------------------------
 
 DefaultAssay(seuratObj) <- "SCT"
+seuratObj$Condition <- dplyr::recode(seuratObj$Condition,
+                                     "M187r" = "Relapse",
+                                     "M187"  = "Diagnosis")
 Idents(seuratObj) <- "Condition"
 
 deg_global <- FindMarkers(
@@ -2848,3 +2908,126 @@ cat("Fichiers générés dans :", clueDir, "\n")
   }
   
   cat("\nTous les fichiers sont dans : ", clueDir, "\n", sep="")
+  
+  
+# clue pour clonotypes 1  et 2 -------------
+  # ── Créer colonne combinée ──────────────────────────────────────
+  seuratObj$Condition_Clonotype <- paste0(seuratObj$Condition, "_", seuratObj$Clonotype)
+  table(seuratObj$Condition_Clonotype)
+  
+  # Setter les identités
+  Idents(seuratObj) <- "Condition_Clonotype"
+  DefaultAssay(seuratObj) <- "SCT"
+  
+  # ── DEG Clonotype1 : Rechute vs Diagnostic ─────────────────────
+  deg_clono1 <- FindMarkers(
+    seuratObj,
+    ident.1 = "Relapse_clonotype1",
+    ident.2 = "Diagnosis_clonotype1",
+    logfc.threshold = 0.25,
+    min.pct = 0.1
+  )
+  cat("DEG clonotype1 :", nrow(deg_clono1), "gènes\n")
+  
+  # ── DEG Clonotype2 : Rechute vs Diagnostic ─────────────────────
+  deg_clono2 <- FindMarkers(
+    seuratObj,
+    ident.1 = "Relapse_clonotype2",
+    ident.2 = "Diagnosis_clonotype2",
+    logfc.threshold = 0.25,
+    min.pct = 0.1
+  )
+  cat("DEG clonotype2 :", nrow(deg_clono2), "gènes\n")
+  
+  # ── Extraire gènes UP/DOWN pour CLUE ───────────────────────────
+  extract_clue_genes <- function(deg, name) {
+    
+    genes_up <- deg %>%
+      filter(p_val_adj < 0.05 & avg_log2FC > 0.25) %>%
+      arrange(desc(avg_log2FC)) %>%
+      head(150) %>%
+      rownames()
+    
+    genes_down <- deg %>%
+      filter(p_val_adj < 0.05 & avg_log2FC < -0.25) %>%
+      arrange(avg_log2FC) %>%
+      head(150) %>%
+      rownames()
+    
+    cat("\n========", name, "========\n")
+    cat("UP   :", length(genes_up), "gènes\n")
+    cat("DOWN :", length(genes_down), "gènes\n")
+    
+    cat("\n--- GENES UP ---\n")
+    cat(genes_up, sep = "\n")
+    
+    cat("\n--- GENES DOWN ---\n")
+    cat(genes_down, sep = "\n")
+    
+    # Retourner une liste pour usage ultérieur
+    list(up = genes_up, down = genes_down)
+  }
+  
+  clue_clono1 <- extract_clue_genes(deg_clono1, "Clonotype1 Relapse vs Diagnosis")
+  clue_clono2 <- extract_clue_genes(deg_clono2, "Clonotype2 Relapse vs Diagnosis")
+
+  
+  # ── Dossier de sortie ──────────────────────────────────────────
+  clueDir <- file.path(figuresDir, "CLUE")
+  dir.create(clueDir, recursive = TRUE, showWarnings = FALSE)
+  
+  # ── Fonction extraction + enregistrement ──────────────────────
+  extract_and_save_clue <- function(deg, name, outDir) {
+    
+    genes_up <- deg %>%
+      filter(p_val_adj < 0.05 & avg_log2FC > 0.25) %>%
+      arrange(desc(avg_log2FC)) %>%
+      head(150) %>%
+      rownames()
+    
+    genes_down <- deg %>%
+      filter(p_val_adj < 0.05 & avg_log2FC < -0.25) %>%
+      arrange(avg_log2FC) %>%
+      head(150) %>%
+      rownames()
+    
+    cat("\n========", name, "========\n")
+    cat("UP   :", length(genes_up), "gènes\n")
+    cat("DOWN :", length(genes_down), "gènes\n")
+    
+    # Enregistrer UP
+    writeLines(
+      genes_up,
+      file.path(outDir, paste0(name, "_UP.txt"))
+    )
+    
+    # Enregistrer DOWN
+    writeLines(
+      genes_down,
+      file.path(outDir, paste0(name, "_DOWN.txt"))
+    )
+    
+    # Enregistrer tableau DEG complet
+    write.csv(
+      deg %>% tibble::rownames_to_column("gene"),
+      file.path(outDir, paste0(name, "_DEG_full.csv")),
+      row.names = FALSE
+    )
+    
+    cat("Fichiers sauvegardés dans :", outDir, "\n")
+    
+    list(up = genes_up, down = genes_down)
+  }
+  
+  # ── Lancer pour chaque clonotype ──────────────────────────────
+  clue_clono1 <- extract_and_save_clue(
+    deg_clono1,
+    name   = "Clonotype1_Relapse_vs_Diagnosis",
+    outDir = clueDir
+  )
+  
+  clue_clono2 <- extract_and_save_clue(
+    deg_clono2,
+    name   = "Clonotype2_Relapse_vs_Diagnosis",
+    outDir = clueDir
+  )

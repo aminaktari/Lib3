@@ -3,3 +3,9 @@ Lib3.Rproj
 filtered_feature_bc_matrix/
 VDJ/
 web_summary_umi.html
+outputFigures/
+outputObjects/
+.RData
+.Rhistory
+.RDataTmp
+.RDataTmp1
